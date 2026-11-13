@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WirelessRecon: Linux Wi-Fi discovery and defensive inventory."""
+"""WirelessRecon: Linux Wi-Fi discovery and privacy-conscious packet capture."""
 
 from __future__ import annotations
 
@@ -14,10 +14,12 @@ from pathlib import Path
 from typing import Iterable
 
 FIELDS = ("SSID", "BSSID", "CHAN", "FREQ", "RATE", "SIGNAL", "SECURITY")
+VERSION = "1.2.0"
+MAX_CAPTURE_SECONDS = 300
 
 
 class WirelessReconError(RuntimeError):
-    """Raised when wireless discovery cannot be completed."""
+    """Raised when wireless discovery or capture cannot be completed."""
 
 
 def run_command(command: list[str], timeout: int = 15) -> subprocess.CompletedProcess[str]:
@@ -36,7 +38,6 @@ def split_nmcli_fields(line: str) -> list[str]:
     values: list[str] = []
     current: list[str] = []
     escaped = False
-
     for char in line.rstrip("\n"):
         if escaped:
             current.append(char)
@@ -48,7 +49,6 @@ def split_nmcli_fields(line: str) -> list[str]:
             current = []
         else:
             current.append(char)
-
     if escaped:
         current.append("\\")
     values.append("".join(current))
@@ -74,10 +74,7 @@ def get_nmcli_device_states() -> dict[str, str]:
 def get_wireless_interfaces() -> list[dict[str, str]]:
     """Return wireless interfaces exposed by the Linux nl80211 subsystem."""
     if shutil.which("iw") is None:
-        raise WirelessReconError(
-            "'iw' was not found. Install it with: sudo apt install iw"
-        )
-
+        raise WirelessReconError("'iw' was not found. Install it with: sudo apt install iw")
     result = run_command(["iw", "dev"])
     if result.returncode != 0:
         raise WirelessReconError(result.stderr.strip() or "Unable to inspect wireless interfaces.")
@@ -85,7 +82,6 @@ def get_wireless_interfaces() -> list[dict[str, str]]:
     interfaces: list[dict[str, str]] = []
     current_phy = ""
     current: dict[str, str] | None = None
-
     for line in result.stdout.splitlines():
         stripped = line.strip()
         phy_match = re.match(r"phy#(\d+)", stripped)
@@ -101,7 +97,6 @@ def get_wireless_interfaces() -> list[dict[str, str]]:
             }
         elif current and stripped.startswith("type "):
             current["type"] = stripped.split(None, 1)[1]
-
     if current:
         interfaces.append(current)
 
@@ -162,13 +157,96 @@ def print_interfaces(interfaces: list[dict[str, str]]) -> None:
     print("-" * 88)
 
 
+def validate_interface(interface: str) -> None:
+    available = {item["name"] for item in get_wireless_interfaces()}
+    if interface not in available:
+        found = ", ".join(sorted(available)) or "none"
+        raise WirelessReconError(
+            f"Wireless interface '{interface}' was not found. Detected interfaces: {found}. "
+            "Run --list-interfaces to inspect adapters."
+        )
+
+
+def get_interface_ipv4(interface: str) -> str:
+    if shutil.which("ip") is None:
+        raise WirelessReconError("'ip' was not found. Install the iproute2 package.")
+    result = run_command(["ip", "-4", "-o", "addr", "show", "dev", interface, "scope", "global"])
+    if result.returncode != 0:
+        raise WirelessReconError(result.stderr.strip() or f"Unable to inspect IPv4 address for {interface}.")
+    for line in result.stdout.splitlines():
+        match = re.search(r"\binet\s+(\d{1,3}(?:\.\d{1,3}){3})/\d+\b", line)
+        if match:
+            return match.group(1)
+    raise WirelessReconError(
+        f"{interface} has no global IPv4 address. Connect your own lab device/network "
+        "before starting this host-only capture."
+    )
+
+
+def capture_host_traffic(interface: str, duration: int, output_path: Path) -> Path:
+    """Capture only packets addressed to/from this host's assigned IPv4 address."""
+    if shutil.which("dumpcap") is None:
+        raise WirelessReconError(
+            "dumpcap was not found. Install Wireshark tools with: sudo apt install wireshark-common"
+        )
+    if duration < 1 or duration > MAX_CAPTURE_SECONDS:
+        raise WirelessReconError(f"Capture duration must be between 1 and {MAX_CAPTURE_SECONDS} seconds.")
+
+    host_ip = get_interface_ipv4(interface)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        raise WirelessReconError(f"Refusing to overwrite existing capture: {output_path}")
+
+    started = datetime.now(timezone.utc)
+    print(f"Starting {duration}-second host-only capture on {interface} ({host_ip}).")
+    print("Capture filter: packets to or from this Kali host's IPv4 address.")
+    print("Only capture traffic on networks and devices you are authorized to assess.")
+
+    command = [
+        "dumpcap", "-q", "-i", interface,
+        "-f", f"host {host_ip}",
+        "-a", f"duration:{duration}",
+        "-w", str(output_path),
+    ]
+    result = run_command(command, timeout=duration + 30)
+    ended = datetime.now(timezone.utc)
+    if result.returncode != 0:
+        if output_path.exists() and output_path.stat().st_size == 0:
+            output_path.unlink()
+        message = result.stderr.strip() or result.stdout.strip() or "dumpcap failed."
+        raise WirelessReconError(message)
+
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        raise WirelessReconError("Capture ended without producing a non-empty PCAPNG file.")
+
+    metadata = {
+        "tool": "WirelessRecon",
+        "version": VERSION,
+        "capture_format": "pcapng",
+        "interface": interface,
+        "host_ipv4": host_ip,
+        "capture_filter": f"host {host_ip}",
+        "scope": "traffic to/from this host only",
+        "started_at": started.isoformat(),
+        "ended_at": ended.isoformat(),
+        "duration_seconds_requested": duration,
+        "file": str(output_path),
+        "file_size_bytes": output_path.stat().st_size,
+    }
+    metadata_path = output_path.with_suffix(output_path.suffix + ".json")
+    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+
+    print(f"PCAPNG capture saved: {output_path}")
+    print(f"Capture metadata saved: {metadata_path}")
+    print(f"File size: {output_path.stat().st_size} bytes")
+    return output_path
+
+
 def run_nmcli(rescan: bool = True, interface: str | None = None) -> list[str]:
     if shutil.which("nmcli") is None:
         raise WirelessReconError(
-            "nmcli was not found. Install NetworkManager "
-            "(for example: sudo apt install network-manager)."
+            "nmcli was not found. Install NetworkManager (for example: sudo apt install network-manager)."
         )
-
     command = [
         "nmcli", "--terse", "--escape", "yes",
         "--fields", ",".join(FIELDS), "device", "wifi", "list",
@@ -177,7 +255,6 @@ def run_nmcli(rescan: bool = True, interface: str | None = None) -> list[str]:
         command.extend(["ifname", interface])
     if rescan:
         command.extend(["--rescan", "yes"])
-
     result = run_command(command, timeout=45)
     if result.returncode != 0:
         raise WirelessReconError(
@@ -192,13 +269,11 @@ def parse_networks(lines: Iterable[str]) -> list[dict[str, str | int | None]]:
         values = split_nmcli_fields(line)
         if len(values) != len(FIELDS):
             continue
-
         ssid, bssid, channel, frequency, rate, signal, security = values
         try:
             signal_value: int | None = int(signal) if signal else None
         except ValueError:
             signal_value = None
-
         networks.append({
             "ssid": ssid or "<hidden>",
             "bssid": bssid or None,
@@ -232,7 +307,7 @@ def save_report(networks: list[dict[str, str | int | None]], output_path: Path,
     output_path.parent.mkdir(parents=True, exist_ok=True)
     report = {
         "tool": "WirelessRecon",
-        "version": "1.1.0",
+        "version": VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "interface": interface,
         "network_count": len(networks),
@@ -244,7 +319,7 @@ def save_report(networks: list[dict[str, str | int | None]], output_path: Path,
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Discover nearby Wi-Fi networks and inspect Linux wireless interfaces."
+        description="Discover nearby Wi-Fi networks and capture your own host's traffic."
     )
     parser.add_argument(
         "--list-interfaces", action="store_true",
@@ -252,19 +327,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--interface", metavar="IFACE",
-        help="Use a specific wireless interface for network discovery (for example: wlan1).",
+        help="Select a wireless interface (for example: wlan0).",
+    )
+    parser.add_argument(
+        "--capture", action="store_true",
+        help="Capture traffic to/from this host's IPv4 address into a PCAPNG file.",
+    )
+    parser.add_argument(
+        "--duration", type=int, default=30,
+        help=f"Capture duration in seconds (1-{MAX_CAPTURE_SECONDS}; default: 30).",
+    )
+    parser.add_argument(
+        "--capture-output", type=Path,
+        help="PCAPNG output path (default: captures/capture_TIMESTAMP.pcapng).",
     )
     parser.add_argument(
         "--no-rescan", action="store_true",
         help="Use NetworkManager's current scan results without requesting a new scan.",
     )
-    parser.add_argument(
-        "--output", type=Path,
-        help="JSON report path (default: reports/scan_TIMESTAMP.json).",
-    )
+    parser.add_argument("--output", type=Path, help="JSON report path.")
     parser.add_argument(
         "--no-save", action="store_true",
-        help="Print results without saving a JSON report.",
+        help="Print discovery results without saving a JSON report.",
     )
     return parser
 
@@ -276,16 +360,17 @@ def main() -> int:
             print_interfaces(get_wireless_interfaces())
             return 0
 
-        if args.interface:
-            interfaces = get_wireless_interfaces()
-            available = {item["name"] for item in interfaces}
-            if args.interface not in available:
-                found = ", ".join(sorted(available)) or "none"
-                raise WirelessReconError(
-                    f"Wireless interface '{args.interface}' was not found. "
-                    f"Detected interfaces: {found}. Run --list-interfaces to inspect adapters."
-                )
+        if args.capture:
+            if not args.interface:
+                raise WirelessReconError("--capture requires --interface so the capture device is explicit.")
+            validate_interface(args.interface)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output = args.capture_output or Path("captures") / f"capture_{timestamp}.pcapng"
+            capture_host_traffic(args.interface, args.duration, output)
+            return 0
 
+        if args.interface:
+            validate_interface(args.interface)
         networks = parse_networks(
             run_nmcli(rescan=not args.no_rescan, interface=args.interface)
         )
