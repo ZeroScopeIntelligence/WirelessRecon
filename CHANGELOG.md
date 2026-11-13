@@ -2,6 +2,19 @@
 
 All notable changes to WirelessRecon are documented here.
 
+## [1.2.0] - 2026-11-13
+
+### Added
+- Bounded-duration PCAPNG capture using dumpcap.
+- Explicit wireless interface selection for capture.
+- Host-only IPv4 capture filter limited to packets to/from the selected Kali interface's own address.
+- JSON metadata sidecar with interface, filter scope, timestamps, duration, and file size.
+- Capture output directory creation and overwrite protection.
+
+### Scope
+- Does not enable monitor mode, capture arbitrary nearby devices, inject packets, or disrupt wireless networks.
+- This is host traffic capture, not 802.11 monitor-mode frame capture.
+
 ## [1.1.0] - 2026-11-13
 
 ### Added
