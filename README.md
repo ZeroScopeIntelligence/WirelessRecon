@@ -1,45 +1,35 @@
 # WirelessRecon
 
-**WirelessRecon v1.1.0** is a Linux command-line tool for discovering nearby Wi-Fi networks and inspecting wireless interfaces for authorized defensive inventory and lab use.
-
-It is intended for wireless inventory, troubleshooting, and authorized defensive learning. It does not connect to networks, bypass security, collect credentials, or disrupt wireless communications.
+**WirelessRecon v1.2.0** is a Linux command-line utility for wireless inventory and privacy-conscious packet capture on devices and networks you are authorized to assess.
 
 ## Features
 - Discover nearby Wi-Fi networks through NetworkManager.
-- Select a specific wireless interface for discovery.
-- List detected wireless interfaces, their Linux driver (when available), NetworkManager state, interface type, and reported monitor-mode capability.
+- Select a wireless interface and inspect its driver, state, type, and reported monitor-mode capability.
 - Display SSID, BSSID, channel, frequency, link rate, signal level, and advertised security mode.
-- Save timestamped JSON reports, including the selected interface.
-- Python CLI with no third-party Python packages.
+- Capture traffic to/from the Kali host's own IPv4 address on a selected interface.
+- Save captures in PCAPNG format with a JSON metadata sidecar.
+- Keep timestamped JSON wireless discovery reports.
+- Regular CLI; no interactive menus and no third-party Python packages.
+
+## Capture scope and privacy
+The initial capture implementation deliberately uses a host-only IPv4 capture filter. It records packets whose source or destination is the selected Kali interface's own assigned IPv4 address. It does not enable monitor mode, capture arbitrary nearby devices, inject packets, or disrupt wireless networks. Captures may still contain sensitive information belonging to your own device; store and share them carefully. Use this feature only on your own device and authorized lab network.
+
+This is not an 802.11 monitor-mode frame recorder. Monitor-mode capture of nearby wireless frames is not part of this release.
 
 ## Requirements
-- Linux, Python 3.9+, NetworkManager (nmcli), the `iw` utility, and a supported Wi-Fi adapter.
+- Linux, Python 3.9+, NetworkManager (nmcli), `iw`, `iproute2`, and a supported Wi-Fi adapter.
+- `dumpcap` from Wireshark tools for PCAPNG capture.
 - Optional: `ethtool` for driver information.
-
-### Do I need an external wireless adapter?
-Not necessarily. Your built-in Wi-Fi adapter may work if Linux recognizes it and NetworkManager supports it. If it is unsupported or no wireless interface appears, a compatible USB Wi-Fi adapter may be needed. Check the exact model and hardware revision for Linux kernel/driver support and supported Wi-Fi bands.
-
-**Virtual machines:** A guest OS usually cannot directly use the host's internal Wi-Fi radio. A USB Wi-Fi adapter passed through to the VM may be required.
 
 ## Installation
 ~~~bash
 git clone https://github.com/ZeroScopeIntelligence/WirelessRecon.git
 cd WirelessRecon
 sudo apt update
-sudo apt install -y python3 network-manager iw ethtool
+sudo apt install -y python3 network-manager iw iproute2 ethtool wireshark-common
 ~~~
 
-Check adapter detection:
-~~~bash
-nmcli --version
-nmcli device status
-iw dev
-~~~
-
-If NetworkManager is not running on a systemd-based distribution:
-~~~bash
-sudo systemctl enable --now NetworkManager
-~~~
+If the Wireshark installer asks whether non-root users may capture packets, choose according to your system's security policy. Otherwise run the capture command with the privileges required by your local dumpcap configuration. Do not run the entire project as root unnecessarily.
 
 ## Usage
 
@@ -48,46 +38,42 @@ List wireless interfaces:
 python3 src/wireless_recon.py --list-interfaces
 ~~~
 
-Scan using the default NetworkManager-selected Wi-Fi device:
+Discover nearby networks:
 ~~~bash
-python3 src/wireless_recon.py
+python3 src/wireless_recon.py --interface wlan0
 ~~~
 
-Select a specific wireless interface:
+Capture your own host's traffic for 30 seconds:
 ~~~bash
-python3 src/wireless_recon.py --interface wlan1
+python3 src/wireless_recon.py --capture --interface wlan0
 ~~~
 
-Use cached scan results on a selected interface:
+Set a shorter capture duration:
 ~~~bash
-python3 src/wireless_recon.py --interface wlan1 --no-rescan
+python3 src/wireless_recon.py --capture --interface wlan0 --duration 15
 ~~~
 
-Choose a JSON report path:
+Choose the PCAPNG output path:
 ~~~bash
-python3 src/wireless_recon.py --interface wlan1 --output reports/lab_scan.json
+python3 src/wireless_recon.py --capture --interface wlan0 --duration 30 --capture-output captures/my-lab.pcapng
 ~~~
 
-Print without saving:
+Capture duration is limited to 1–300 seconds. The program refuses to overwrite an existing capture. Each capture also creates a JSON metadata file beside it, for example `my-lab.pcapng.json`.
+
+## Inspecting a capture
+Open the PCAPNG file in Wireshark, or inspect its summary with:
 ~~~bash
-python3 src/wireless_recon.py --interface wlan1 --no-save
+capinfos captures/my-lab.pcapng
 ~~~
 
-By default, reports are saved under reports/. The directory is created automatically. Replace `wlan1` with an interface name shown by `--list-interfaces`.
-
-## Understanding monitor-mode status
-The interface listing checks the wireless PHY's advertised supported interface modes using `iw`. A reported monitor-mode capability means the driver advertises that mode; it does not guarantee that every capture configuration will work. This release does not automatically change interface modes or start packet capture.
+If no packets are captured, make sure the selected interface has an IPv4 address and that your own device generates ordinary network traffic during the short capture window. For example, open a page on your own device while capturing. The capture filter only includes traffic to/from that device's assigned IPv4 address.
 
 ## Troubleshooting
-If no wireless interfaces appear:
-1. Check `iw dev` and `nmcli device status`.
-2. In a VM, check USB passthrough and guest driver support.
-3. Check software/hardware blocks with `rfkill list`.
-4. Confirm that the correct Linux driver is installed.
-
-If a selected interface is rejected, run `--list-interfaces` and use the exact interface name displayed. A wireless interface not managed by NetworkManager may be listed but unavailable for NetworkManager scans.
-
-Zero discovered networks does not necessarily indicate a program error. The adapter may be blocked, unsupported, out of range, or unable to scan in its current environment.
+- Run `ip -4 addr show dev wlan0` to confirm the interface has an IPv4 address.
+- Run `dumpcap -D` to confirm Wireshark can see capture interfaces.
+- If dumpcap reports a permissions error, review your distribution's Wireshark capture permissions.
+- Run `python3 src/wireless_recon.py --list-interfaces` to verify the interface name.
+- In a VM, confirm the adapter is passed through to Kali and the guest driver is loaded.
 
 ## Project structure
 ~~~text
@@ -97,18 +83,18 @@ WirelessRecon/
 ├── CHANGELOG.md
 ├── requirements.txt
 ├── .gitignore
+├── captures/
 ├── reports/
-│   └── .gitkeep
 └── src/
     └── wireless_recon.py
 ~~~
 
 ## Responsible use
-Use WirelessRecon only on devices and networks you own or are explicitly authorized to assess. It is a passive discovery and inventory utility. Do not use it to interfere with networks, bypass access controls, or access systems without permission. Packet-capture capabilities, if added in a future release, should be used only in authorized environments and handled as potentially sensitive data.
+Use WirelessRecon only on your own devices and networks you are explicitly authorized to assess. PCAPNG files can contain sensitive data. Protect them, avoid publishing captures, and delete them when no longer needed.
 
 ## Version
-- Current version: **1.1.0**
-- Release: **Wireless interface selection**
+- Current version: **1.2.0**
+- Release: **Host-scoped PCAPNG capture**
 - Maintainer: **RUNNINDEAD**
 - Project: **ZeroScope Solutions**
 
