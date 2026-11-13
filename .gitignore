@@ -1,10 +1,1 @@
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-.env
-.pytest_cache/
-.coverage
-reports/*.json
-!reports/.gitkeep
-.DS_Store
+__pycache__/\n*.py[cod]\n.venv/\nvenv/\n.env\n.pytest_cache/\n.coverage\nreports/*.json\n!reports/.gitkeep\ncaptures/*.pcap\ncaptures/*.pcapng\ncaptures/*.json\n!captures/.gitkeep\n.DS_Store\n
